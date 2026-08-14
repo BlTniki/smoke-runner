@@ -28,7 +28,8 @@
 ## Текущий статус
 
 Требования `1.2` и архитектура `1.1` согласованы. Каркас и доменный этап
-`WP-00`–`WP-12` завершены. Следующий пакет `WP-20` ещё не начат.
+`WP-00`–`WP-12`, а также persistence-этап `WP-20`–`WP-21` завершены. Telegram
+MVP из этапа 3 ещё не начат.
 
 ## Локальная разработка
 
@@ -37,6 +38,7 @@
 
 ```bash
 uv sync --locked
+SMOKE_RUNNER_DATABASE_PATH=./data/smoke-runner.sqlite3 uv run alembic upgrade head
 uv run python -m smoke_runner --help
 make check
 ```

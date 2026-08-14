@@ -1,6 +1,6 @@
 # План реализации
 
-Статус: согласовано, этап 1 завершён, этап 2 не начат, версия 1.0
+Статус: согласовано, этапы 0–2 завершены, этап 3 не начат, версия 1.0
 Основание: требования 1.2, архитектура 1.1
 
 ## 1. Принцип исполнения
@@ -107,6 +107,8 @@ last session before next wake и серии дней без нарушений.
 
 ### WP-20. SQLAlchemy models и Alembic
 
+Статус: завершено 2026-08-14.
+
 - Реализовать схему из [data-model.md](data-model.md).
 - Добавить первую migration с constraints/indexes.
 - Настроить async engine, one-slot pool и SQLite pragmas.
@@ -121,6 +123,8 @@ last session before next wake и серии дней без нарушений.
 - каждая async task получает отдельный AsyncSession object.
 
 ### WP-21. Idempotent use cases
+
+Статус: завершено 2026-08-14.
 
 Реализовать транзакции log now/backfill/edit/delete/wake/change interval и
 processed update guard.
