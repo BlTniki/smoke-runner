@@ -1,6 +1,6 @@
 # Архитектура Smoke Runner
 
-Статус: предложено к ревью, версия 1.0  
+Статус: согласовано, версия 1.1
 Основание: продуктовые требования 1.2  
 Дата: 2026-08-14
 
@@ -29,7 +29,7 @@ minor/major-диапазоны.
 | Runtime | Python 3.14 | Актуальная стабильная ветка с bugfix-поддержкой до перехода в security mode; проект использует обычный GIL build. |
 | Окружение | `uv`, `pyproject.toml`, `uv.lock` | Одинаковое воспроизводимое окружение без Docker и внутри контейнера. |
 | Telegram | aiogram 3.x | Asyncio, long polling, routers, middleware, inline keyboard и FSM в одном фреймворке. |
-| Доступ к БД | SQLAlchemy 2.1 async + `aiosqlite` | Явные транзакции, типизированные модели и возможность заменить SQLite без переписывания use cases. |
+| Доступ к БД | SQLAlchemy 2.0 async + `aiosqlite` | Явные транзакции, типизированные модели и возможность заменить SQLite без переписывания use cases; используется стабильная, не prerelease-ветка. |
 | Миграции | Alembic 1.x | Версионированные forward-миграции схемы SQLAlchemy. |
 | Настройки | Pydantic Settings 2.x | Валидация environment variables и secret files при старте. |
 | Графики | Matplotlib 3.10+ с backend `Agg` | Генерация PNG без GUI и браузера. |
@@ -40,9 +40,9 @@ Python 3.14 находится в bugfix-статусе и поддержива�
 [официальной таблице версий Python](https://devguide.python.org/versions/).
 aiogram документирует asyncio, routers, FSM и long polling в
 [официальной документации](https://docs.aiogram.dev/en/v3.29.0/).
-SQLAlchemy поддерживает `sqlite+aiosqlite` через async engine, при этом требует
+SQLAlchemy 2.0 поддерживает `sqlite+aiosqlite` через async engine, при этом требует
 отдельный `AsyncSession` на задачу
-([SQLite dialect](https://docs.sqlalchemy.org/en/21/dialects/sqlite.html),
+([SQLite dialect](https://docs.sqlalchemy.org/en/20/dialects/sqlite.html),
 [session concurrency](https://docs.sqlalchemy.org/en/20/orm/session_basics.html)).
 
 ### Что намеренно не добавляется

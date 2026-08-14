@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "smoke-runner"
+version = "0.1.0"
+description = "Telegram bot for gradually increasing the time between vaping sessions"
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "aiogram>=3.29,<4",
+    "aiosqlite>=0.21,<1",
+    "alembic>=1.16,<2",
+    "matplotlib>=3.10,<4",
+    "pydantic-settings>=2.10,<3",
+    "sqlalchemy>=2.0,<2.1",
+]
+
+[project.scripts]
+smoke-runner = "smoke_runner.__main__:main"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.140,<7",
+    "mypy>=1.18,<2",
+    "pytest>=9,<10",
+    "pytest-asyncio>=1.2,<2",
+    "ruff>=0.14,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/smoke_runner"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+warn_unreachable = true
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+asyncio_default_fixture_loop_scope = "function"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "RUF", "UP"]

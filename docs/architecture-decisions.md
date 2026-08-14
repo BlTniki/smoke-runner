@@ -1,6 +1,6 @@
 # Архитектурные решения
 
-Статус: предложено к ревью, версия 1.0
+Статус: согласовано, версия 1.1
 
 ## ADR-001: модульный монолит в одном процессе
 
@@ -25,11 +25,13 @@ network services. Один процесс упрощает транзакции,
 
 ## ADR-003: SQLAlchemy async поверх SQLite без WAL
 
-**Решение:** SQLAlchemy 2.1 + aiosqlite, pool из одного connection, rollback
+**Решение:** стабильный SQLAlchemy 2.0 + aiosqlite, pool из одного connection, rollback
 journal `DELETE`, `synchronous=FULL`.
 
 **Причина:** типизированная схема и транзакции полезны уже в MVP; один connection
-соответствует single-process модели. WAL не нужен при текущей нагрузке.
+соответствует single-process модели. Ветка 2.1 на старте реализации доступна
+только как prerelease, поэтому в основу не берётся. WAL не нужен при текущей
+нагрузке.
 
 **Следствие:** все DB-транзакции короткие, Telegram и Matplotlib выполняются
 после их завершения. При реальной нехватке concurrency база мигрирует на
@@ -88,4 +90,3 @@ Docker build.
 
 **Следствие:** будущий provider подключается отдельным adapter с opt-in, timeout
 и fallback без изменения domain/application слоёв.
-

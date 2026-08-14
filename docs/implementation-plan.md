@@ -1,7 +1,7 @@
 # План реализации
 
-Статус: предложено к ревью, версия 1.0  
-Основание: требования 1.2, архитектура 1.0
+Статус: согласовано, этап 1 завершён, этап 2 не начат, версия 1.0
+Основание: требования 1.2, архитектура 1.1
 
 ## 1. Принцип исполнения
 
@@ -21,6 +21,8 @@ uv run pytest
 ## 2. Этап 0 — каркас проекта
 
 ### WP-00. Python project
+
+Статус: завершено 2026-08-14.
 
 Результат:
 
@@ -42,6 +44,8 @@ uv run pytest
 Этот этап не импортирует aiogram, SQLAlchemy или Matplotlib.
 
 ### WP-10. Timeline и interval policy
+
+Статус: завершено 2026-08-14.
 
 Реализовать:
 
@@ -70,6 +74,8 @@ Hypothesis invariants:
 
 ### WP-11. Метрики, wake cycles и streaks
 
+Статус: завершено 2026-08-14.
+
 Реализовать daily/weekly aggregates, partial first week, actual gaps, wake-to-first,
 last session before next wake и серии дней без нарушений.
 
@@ -84,6 +90,8 @@ last session before next wake и серии дней без нарушений.
 - backfill violation пересчитывает streak.
 
 ### WP-12. Feedback и report snapshots
+
+Статус: завершено 2026-08-14.
 
 Реализовать:
 
