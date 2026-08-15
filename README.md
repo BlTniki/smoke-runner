@@ -27,9 +27,10 @@
 
 ## Текущий статус
 
-Требования `1.2` и архитектура `1.1` согласованы. Каркас и доменный этап
-`WP-00`–`WP-12`, а также persistence-этап `WP-20`–`WP-21` завершены. Telegram
-MVP из этапа 3 ещё не начат.
+Требования `1.2` и архитектура `1.1` согласованы. Этапы 0–3 завершены:
+доменное ядро, SQLite persistence, закрытый Telegram-доступ и интерактивный MVP
+с логированием, backfill, историей и настройкой интервала. Следующий этап —
+durable scheduler, уведомления о рубеже и пяти-минутное обновление дашборда.
 
 ## Локальная разработка
 
@@ -38,10 +39,30 @@ MVP из этапа 3 ещё не начат.
 
 ```bash
 uv sync --locked
-SMOKE_RUNNER_DATABASE_PATH=./data/smoke-runner.sqlite3 uv run alembic upgrade head
 uv run python -m smoke_runner --help
 make check
 ```
 
-Настройки для будущего запуска бота перечислены в `.env.example`; тесты и
-справка CLI не требуют настоящих секретов.
+## Запуск бота
+
+Docker не требуется. Создай Telegram-бота через BotFather, узнай свой числовой
+Telegram user ID и подготовь конфигурацию:
+
+```bash
+cp .env.example .env
+openssl rand -hex 32
+```
+
+В `.env` замени `SMOKE_RUNNER_BOT_TOKEN`,
+`SMOKE_RUNNER_ADMIN_TELEGRAM_USER_ID` и вставь результат последней команды в
+`SMOKE_RUNNER_INVITE_PEPPER`. Затем:
+
+```bash
+uv sync --locked
+uv run python -m smoke_runner
+```
+
+Миграции SQLite выполняются автоматически перед polling. После запуска открой
+личный чат с ботом и отправь `/start`. Администратор может создавать приглашения
+командой `/invite`, смотреть пользователей через `/users` и отзывать доступ
+командой `/revoke <номер>`. Тесты и `--help` не требуют настоящих секретов.

@@ -1,1 +1,80 @@
-"""Composition root for application adapters and use cases."""
+"""Application composition root and polling lifecycle."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import timedelta
+from typing import cast
+
+from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.memory import MemoryStorage
+
+from smoke_runner.application.ports import TrackingUnitOfWork
+from smoke_runner.application.security import InviteService
+from smoke_runner.application.tracking import TrackingService
+from smoke_runner.config import Settings
+from smoke_runner.domain.clock import SystemClock
+from smoke_runner.infrastructure.db.engine import create_database_engine, create_session_factory
+from smoke_runner.infrastructure.db.gateway import DatabaseGateway
+from smoke_runner.infrastructure.db.migrations import upgrade_database
+from smoke_runner.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
+from smoke_runner.infrastructure.telegram.middleware import PrivateAuthMiddleware
+from smoke_runner.infrastructure.telegram.routers import BotServices, build_router
+from smoke_runner.infrastructure.telegram.screens import ScreenManager
+
+
+def run(settings: Settings) -> None:
+    """Migrate the database and run one polling process until stopped."""
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    upgrade_database(settings.database_path)
+    asyncio.run(run_polling(settings))
+
+
+async def run_polling(settings: Settings) -> None:
+    engine = create_database_engine(settings.database_path)
+    session_factory = create_session_factory(engine)
+    clock = SystemClock()
+    gateway = DatabaseGateway(session_factory)
+    await gateway.bootstrap_admin(
+        telegram_user_id=settings.admin_telegram_user_id,
+        timezone_name=settings.default_timezone,
+        now=clock.now(),
+    )
+
+    def uow_factory() -> TrackingUnitOfWork:
+        return cast(TrackingUnitOfWork, SqlAlchemyUnitOfWork(session_factory))
+
+    tracking = TrackingService(uow_factory, clock)
+    invite_service = InviteService(
+        gateway,
+        pepper=settings.invite_pepper.get_secret_value(),
+        clock=clock,
+        ttl=timedelta(hours=settings.invite_ttl_hours),
+        timezone_name=settings.default_timezone,
+    )
+    services = BotServices(
+        gateway=gateway,
+        invite_service=invite_service,
+        tracking=tracking,
+        screens=ScreenManager(gateway, clock),
+        clock=clock,
+    )
+    router = build_router(services)
+    middleware = PrivateAuthMiddleware(gateway)
+    router.message.outer_middleware(middleware)
+    router.callback_query.outer_middleware(middleware)
+
+    dispatcher = Dispatcher(storage=MemoryStorage())
+    dispatcher.include_router(router)
+    bot = Bot(token=settings.bot_token.get_secret_value())
+    try:
+        await dispatcher.start_polling(
+            bot,
+            tasks_concurrency_limit=settings.polling_concurrency_limit,
+        )
+    finally:
+        await engine.dispose()

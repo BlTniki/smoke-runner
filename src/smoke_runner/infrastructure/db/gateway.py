@@ -1,0 +1,457 @@
+"""Transactional access, query and Telegram screen persistence gateway."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from smoke_runner.application.models import UserContext
+from smoke_runner.application.security import AuthenticatedUser, ManagedUser
+from smoke_runner.domain.clock import UtcInstant
+from smoke_runner.domain.models import IntervalChange, SmokingSession, WakeEvent
+from smoke_runner.infrastructure.db.engine import SessionFactory
+from smoke_runner.infrastructure.db.models import (
+    DashboardStateRow,
+    IntervalChangeRow,
+    InviteCodeRow,
+    SmokingSessionRow,
+    UserRow,
+    WakeEventRow,
+)
+from smoke_runner.infrastructure.db.repositories import (
+    SqlAlchemyInviteRedemption,
+    _to_interval_change,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardFacts:
+    user: UserContext
+    sessions: tuple[SmokingSession, ...]
+    wakes: tuple[WakeEvent, ...]
+    intervals: tuple[IntervalChange, ...]
+    last_feedback_template_key: str | None
+
+
+class HistoryKind(StrEnum):
+    SESSION = "session"
+    WAKE = "wake"
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryItem:
+    kind: HistoryKind
+    id: int
+    occurred_at: UtcInstant
+    source: str
+    created_at: UtcInstant
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardState:
+    user_id: int
+    telegram_chat_id: int
+    telegram_message_id: int | None
+    screen_kind: str
+
+
+class DatabaseGateway:
+    """Small transaction-per-call gateway for auth and read-side bot flows."""
+
+    def __init__(self, session_factory: SessionFactory) -> None:
+        self._session_factory = session_factory
+
+    async def bootstrap_admin(
+        self,
+        *,
+        telegram_user_id: int,
+        timezone_name: str,
+        now: UtcInstant,
+    ) -> AuthenticatedUser:
+        now_seconds = now.to_unix_seconds()
+        async with self._session_factory() as session, session.begin():
+            row = await session.scalar(
+                select(UserRow).where(UserRow.telegram_user_id == telegram_user_id)
+            )
+            if row is None:
+                row = UserRow(
+                    telegram_user_id=telegram_user_id,
+                    telegram_private_chat_id=telegram_user_id,
+                    role="admin",
+                    status="active",
+                    timezone_name=timezone_name,
+                    milestone_notifications_enabled=True,
+                    ai_commentary_enabled=False,
+                    activated_at_utc=now_seconds,
+                    created_at_utc=now_seconds,
+                    updated_at_utc=now_seconds,
+                )
+                session.add(row)
+                await session.flush()
+            else:
+                row.role = "admin"
+                row.status = "active"
+                row.revoked_at_utc = None
+                row.updated_at_utc = now_seconds
+
+            has_interval = await session.scalar(
+                select(IntervalChangeRow.id).where(IntervalChangeRow.user_id == row.id).limit(1)
+            )
+            if has_interval is None:
+                session.add(
+                    IntervalChangeRow(
+                        user_id=row.id,
+                        effective_at_utc=row.activated_at_utc,
+                        interval_seconds=3600,
+                        display_unit="hour",
+                        created_at_utc=now_seconds,
+                    )
+                )
+            await session.flush()
+            return _authenticated(row)
+
+    async def find_active_user(self, telegram_user_id: int) -> AuthenticatedUser | None:
+        async with self._session_factory() as session:
+            row = await session.scalar(
+                select(UserRow).where(
+                    UserRow.telegram_user_id == telegram_user_id,
+                    UserRow.status == "active",
+                )
+            )
+            return None if row is None else _authenticated(row)
+
+    async def insert_invite(
+        self,
+        *,
+        created_by_user_id: int,
+        code_digest: str,
+        created_at: UtcInstant,
+        expires_at: UtcInstant,
+    ) -> None:
+        async with self._session_factory() as session, session.begin():
+            creator = await session.scalar(
+                select(UserRow).where(
+                    UserRow.id == created_by_user_id,
+                    UserRow.role == "admin",
+                    UserRow.status == "active",
+                )
+            )
+            if creator is None:
+                raise PermissionError("Active administrator not found")
+            session.add(
+                InviteCodeRow(
+                    code_digest=code_digest,
+                    created_by_user_id=created_by_user_id,
+                    created_at_utc=created_at.to_unix_seconds(),
+                    expires_at_utc=expires_at.to_unix_seconds(),
+                )
+            )
+
+    async def redeem_invite(
+        self,
+        *,
+        code_digest: str,
+        telegram_user_id: int,
+        telegram_private_chat_id: int,
+        timezone_name: str,
+        now: UtcInstant,
+    ) -> AuthenticatedUser | None:
+        try:
+            async with self._session_factory() as session, session.begin():
+                already = await session.scalar(
+                    select(UserRow).where(UserRow.telegram_user_id == telegram_user_id)
+                )
+                if already is not None:
+                    return _authenticated(already) if already.status == "active" else None
+                redeemed = await SqlAlchemyInviteRedemption(session).redeem(
+                    code_digest=code_digest,
+                    telegram_user_id=telegram_user_id,
+                    telegram_private_chat_id=telegram_private_chat_id,
+                    timezone_name=timezone_name,
+                    now=now,
+                )
+                if redeemed is None:
+                    return None
+                row = await session.get(UserRow, redeemed.id)
+                assert row is not None
+                return _authenticated(row)
+        except IntegrityError:
+            # Concurrent redemption or a Telegram identity collision is a clean rejection.
+            return None
+
+    async def list_users(self, admin_user_id: int) -> tuple[ManagedUser, ...]:
+        async with self._session_factory() as session:
+            await _require_admin(session, admin_user_id)
+            rows = (
+                await session.scalars(select(UserRow).order_by(UserRow.created_at_utc, UserRow.id))
+            ).all()
+            return tuple(
+                ManagedUser(
+                    id=row.id,
+                    telegram_user_id=row.telegram_user_id,
+                    role=row.role,
+                    status=row.status,
+                )
+                for row in rows
+            )
+
+    async def revoke_user(
+        self,
+        *,
+        admin_user_id: int,
+        target_user_id: int,
+        now: UtcInstant,
+    ) -> bool:
+        async with self._session_factory() as session, session.begin():
+            await _require_admin(session, admin_user_id)
+            result = await session.execute(
+                update(UserRow)
+                .where(
+                    UserRow.id == target_user_id,
+                    UserRow.role != "admin",
+                    UserRow.status == "active",
+                )
+                .values(
+                    status="revoked",
+                    revoked_at_utc=now.to_unix_seconds(),
+                    updated_at_utc=now.to_unix_seconds(),
+                )
+                .returning(UserRow.id)
+            )
+            return result.scalar_one_or_none() is not None
+
+    async def dashboard_facts(self, user_id: int) -> DashboardFacts | None:
+        async with self._session_factory() as session:
+            user = await session.scalar(
+                select(UserRow).where(UserRow.id == user_id, UserRow.status == "active")
+            )
+            if user is None:
+                return None
+            session_rows = (
+                await session.scalars(
+                    select(SmokingSessionRow)
+                    .where(
+                        SmokingSessionRow.user_id == user_id,
+                        SmokingSessionRow.deleted_at_utc.is_(None),
+                    )
+                    .order_by(SmokingSessionRow.occurred_at_utc, SmokingSessionRow.id)
+                )
+            ).all()
+            wake_rows = (
+                await session.scalars(
+                    select(WakeEventRow)
+                    .where(
+                        WakeEventRow.user_id == user_id,
+                        WakeEventRow.deleted_at_utc.is_(None),
+                    )
+                    .order_by(WakeEventRow.occurred_at_utc, WakeEventRow.id)
+                )
+            ).all()
+            interval_rows = (
+                await session.scalars(
+                    select(IntervalChangeRow)
+                    .where(IntervalChangeRow.user_id == user_id)
+                    .order_by(IntervalChangeRow.effective_at_utc, IntervalChangeRow.id)
+                )
+            ).all()
+            return DashboardFacts(
+                user=UserContext(
+                    id=user.id,
+                    timezone_name=user.timezone_name,
+                    activated_at=UtcInstant.from_unix_seconds(user.activated_at_utc),
+                    milestone_notifications_enabled=user.milestone_notifications_enabled,
+                ),
+                sessions=tuple(
+                    SmokingSession(
+                        id=row.id,
+                        occurred_at=UtcInstant.from_unix_seconds(row.occurred_at_utc),
+                    )
+                    for row in session_rows
+                ),
+                wakes=tuple(
+                    WakeEvent(
+                        id=row.id,
+                        occurred_at=UtcInstant.from_unix_seconds(row.occurred_at_utc),
+                    )
+                    for row in wake_rows
+                ),
+                intervals=tuple(_to_interval_change(row) for row in interval_rows),
+                last_feedback_template_key=user.last_feedback_template_key,
+            )
+
+    async def set_feedback_template_key(self, user_id: int, key: str) -> None:
+        async with self._session_factory() as session, session.begin():
+            await session.execute(
+                update(UserRow)
+                .where(UserRow.id == user_id, UserRow.status == "active")
+                .values(last_feedback_template_key=key)
+            )
+
+    async def set_milestone_notifications(self, user_id: int, enabled: bool) -> None:
+        async with self._session_factory() as session, session.begin():
+            await session.execute(
+                update(UserRow)
+                .where(UserRow.id == user_id, UserRow.status == "active")
+                .values(milestone_notifications_enabled=enabled)
+            )
+
+    async def history(
+        self,
+        *,
+        user_id: int,
+        offset: int,
+        limit: int,
+        start_at: UtcInstant | None = None,
+        end_at: UtcInstant | None = None,
+    ) -> tuple[HistoryItem, ...]:
+        async with self._session_factory() as session:
+            session_query = select(SmokingSessionRow).where(
+                SmokingSessionRow.user_id == user_id,
+                SmokingSessionRow.deleted_at_utc.is_(None),
+            )
+            wake_query = select(WakeEventRow).where(
+                WakeEventRow.user_id == user_id,
+                WakeEventRow.deleted_at_utc.is_(None),
+            )
+            if start_at is not None:
+                session_query = session_query.where(
+                    SmokingSessionRow.occurred_at_utc >= start_at.to_unix_seconds()
+                )
+                wake_query = wake_query.where(
+                    WakeEventRow.occurred_at_utc >= start_at.to_unix_seconds()
+                )
+            if end_at is not None:
+                session_query = session_query.where(
+                    SmokingSessionRow.occurred_at_utc < end_at.to_unix_seconds()
+                )
+                wake_query = wake_query.where(
+                    WakeEventRow.occurred_at_utc < end_at.to_unix_seconds()
+                )
+            session_rows = (await session.scalars(session_query)).all()
+            wake_rows = (await session.scalars(wake_query)).all()
+            items = [
+                HistoryItem(
+                    kind=HistoryKind.SESSION,
+                    id=row.id,
+                    occurred_at=UtcInstant.from_unix_seconds(row.occurred_at_utc),
+                    source=row.source,
+                    created_at=UtcInstant.from_unix_seconds(row.created_at_utc),
+                )
+                for row in session_rows
+            ]
+            items.extend(
+                HistoryItem(
+                    kind=HistoryKind.WAKE,
+                    id=row.id,
+                    occurred_at=UtcInstant.from_unix_seconds(row.occurred_at_utc),
+                    source=row.source,
+                    created_at=UtcInstant.from_unix_seconds(row.created_at_utc),
+                )
+                for row in wake_rows
+            )
+            items.sort(key=lambda item: (item.occurred_at, item.id), reverse=True)
+            return tuple(items[offset : offset + limit])
+
+    async def get_history_item(
+        self, *, user_id: int, kind: HistoryKind, record_id: int
+    ) -> HistoryItem | None:
+        async with self._session_factory() as session:
+            if kind is HistoryKind.SESSION:
+                session_row = await session.scalar(
+                    select(SmokingSessionRow).where(
+                        SmokingSessionRow.id == record_id,
+                        SmokingSessionRow.user_id == user_id,
+                        SmokingSessionRow.deleted_at_utc.is_(None),
+                    )
+                )
+                if session_row is None:
+                    return None
+                return HistoryItem(
+                    kind=kind,
+                    id=session_row.id,
+                    occurred_at=UtcInstant.from_unix_seconds(session_row.occurred_at_utc),
+                    source=session_row.source,
+                    created_at=UtcInstant.from_unix_seconds(session_row.created_at_utc),
+                )
+
+            wake_row = await session.scalar(
+                select(WakeEventRow).where(
+                    WakeEventRow.id == record_id,
+                    WakeEventRow.user_id == user_id,
+                    WakeEventRow.deleted_at_utc.is_(None),
+                )
+            )
+            if wake_row is None:
+                return None
+            return HistoryItem(
+                kind=kind,
+                id=wake_row.id,
+                occurred_at=UtcInstant.from_unix_seconds(wake_row.occurred_at_utc),
+                source=wake_row.source,
+                created_at=UtcInstant.from_unix_seconds(wake_row.created_at_utc),
+            )
+
+    async def get_dashboard_state(self, user_id: int) -> DashboardState | None:
+        async with self._session_factory() as session:
+            row = await session.get(DashboardStateRow, user_id)
+            if row is None:
+                return None
+            return DashboardState(
+                user_id=row.user_id,
+                telegram_chat_id=row.telegram_chat_id,
+                telegram_message_id=row.telegram_message_id,
+                screen_kind=row.screen_kind,
+            )
+
+    async def save_dashboard_state(
+        self,
+        *,
+        user_id: int,
+        telegram_chat_id: int,
+        telegram_message_id: int,
+        screen_kind: str,
+        now: UtcInstant,
+    ) -> None:
+        async with self._session_factory() as session, session.begin():
+            row = await session.get(DashboardStateRow, user_id)
+            if row is None:
+                session.add(
+                    DashboardStateRow(
+                        user_id=user_id,
+                        telegram_chat_id=telegram_chat_id,
+                        telegram_message_id=telegram_message_id,
+                        screen_kind=screen_kind,
+                        updated_at_utc=now.to_unix_seconds(),
+                    )
+                )
+            else:
+                row.telegram_chat_id = telegram_chat_id
+                row.telegram_message_id = telegram_message_id
+                row.screen_kind = screen_kind
+                row.updated_at_utc = now.to_unix_seconds()
+
+
+def _authenticated(row: UserRow) -> AuthenticatedUser:
+    return AuthenticatedUser(
+        id=row.id,
+        telegram_user_id=row.telegram_user_id,
+        telegram_private_chat_id=row.telegram_private_chat_id,
+        role=row.role,
+        timezone_name=row.timezone_name,
+    )
+
+
+async def _require_admin(session: AsyncSession, user_id: int) -> None:
+    row = await session.scalar(
+        select(UserRow.id).where(
+            UserRow.id == user_id,
+            UserRow.role == "admin",
+            UserRow.status == "active",
+        )
+    )
+    if row is None:
+        raise PermissionError("Active administrator not found")

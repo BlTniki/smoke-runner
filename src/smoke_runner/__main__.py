@@ -19,10 +19,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Parse CLI arguments and show the available interface."""
+    """Parse CLI arguments, then load settings and start polling."""
     parser = build_parser()
     parser.parse_args(argv)
-    parser.print_help()
+    from smoke_runner.bootstrap import run
+    from smoke_runner.config import Settings
+
+    run(Settings())  # type: ignore[call-arg]  # Values come from the settings environment.
     return 0
 
 
