@@ -285,8 +285,20 @@ WAL намеренно не включается в первой версии: �
 
 ### Начальный администратор
 
-`ADMIN_TELEGRAM_USER_ID` задаётся обязательной настройкой. На bootstrap
-соответствующий пользователь создаётся или получает роль `admin`. Bot token и
+Если в БД ещё нет администратора и `ADMIN_TELEGRAM_USER_ID` не задан, процесс
+создаёт один короткоживущий bootstrap-код и печатает его в терминал. В БД
+хранится только HMAC-SHA256 digest. При следующем запуске до привязки singleton-
+код атомарно заменяется, поэтому старый сразу перестаёт работать.
+
+Пользователь отправляет код боту в private chat. В одной транзакции код
+погашается, Telegram user ID привязывается к роли `admin`, создаётся начальный
+интервал и удаляется bootstrap-код. Частичный unique index по `users.role`
+запрещает второго администратора на уровне SQLite. Обычная `/revoke` не может
+отозвать администратора.
+
+`ADMIN_TELEGRAM_USER_ID` остаётся необязательной альтернативой для
+автоматизированного deploy. Если БД уже привязана к другому администратору,
+процесс завершается с ошибкой вместо скрытой смены владельца. Bot token и
 invite-code pepper поступают только через environment/secret file.
 
 ### Приглашение
@@ -347,9 +359,7 @@ provider metadata без изменений доменного расчёта и
 
 ```text
 SMOKE_RUNNER_BOT_TOKEN
-SMOKE_RUNNER_ADMIN_TELEGRAM_USER_ID
 SMOKE_RUNNER_INVITE_PEPPER
-SMOKE_RUNNER_DATABASE_PATH
 ```
 
 Опциональные настройки имеют безопасные defaults:
@@ -357,6 +367,9 @@ SMOKE_RUNNER_DATABASE_PATH
 ```text
 SMOKE_RUNNER_LOG_LEVEL=INFO
 SMOKE_RUNNER_DEFAULT_TIMEZONE=Europe/Moscow
+SMOKE_RUNNER_DATABASE_PATH=./data/smoke-runner.sqlite3
+SMOKE_RUNNER_ADMIN_BOOTSTRAP_TTL_MINUTES=30
+SMOKE_RUNNER_ADMIN_TELEGRAM_USER_ID=<optional positive integer>
 SMOKE_RUNNER_BACKUP_DIR=/data/backups
 SMOKE_RUNNER_BACKUP_RETENTION_DAYS=30
 ```

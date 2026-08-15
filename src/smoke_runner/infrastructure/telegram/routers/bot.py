@@ -20,7 +20,11 @@ from smoke_runner.application.models import (
     EventSource,
     LogEventCommand,
 )
-from smoke_runner.application.security import AuthenticatedUser, InviteService
+from smoke_runner.application.security import (
+    AdminBootstrapService,
+    AuthenticatedUser,
+    InviteService,
+)
 from smoke_runner.application.tracking import (
     EventOutsideTrackedPeriodError,
     RecordNotFoundError,
@@ -66,6 +70,7 @@ from smoke_runner.infrastructure.telegram.screens import ScreenManager
 @dataclass(frozen=True, slots=True)
 class BotServices:
     gateway: DatabaseGateway
+    admin_bootstrap_service: AdminBootstrapService
     invite_service: InviteService
     tracking: TrackingService
     screens: ScreenManager
@@ -114,8 +119,9 @@ def build_router(services: BotServices) -> Router:
         if user is None and command.args:
             if message.from_user is None:
                 return
-            user = await services.invite_service.redeem(
-                plaintext_code=command.args,
+            user = await _redeem_access_code(
+                services,
+                command.args,
                 telegram_user_id=message.from_user.id,
                 telegram_private_chat_id=message.chat.id,
             )
@@ -202,8 +208,9 @@ def build_router(services: BotServices) -> Router:
         await state.clear()
         if message.from_user is None:
             return
-        user = await services.invite_service.redeem(
-            plaintext_code=message.text or "",
+        user = await _redeem_access_code(
+            services,
+            message.text or "",
             telegram_user_id=message.from_user.id,
             telegram_private_chat_id=message.chat.id,
         )
@@ -742,6 +749,27 @@ def build_router(services: BotServices) -> Router:
         )
 
     return router
+
+
+async def _redeem_access_code(
+    services: BotServices,
+    plaintext_code: str,
+    *,
+    telegram_user_id: int,
+    telegram_private_chat_id: int,
+) -> AuthenticatedUser | None:
+    admin = await services.admin_bootstrap_service.redeem(
+        plaintext_code=plaintext_code,
+        telegram_user_id=telegram_user_id,
+        telegram_private_chat_id=telegram_private_chat_id,
+    )
+    if admin is not None:
+        return admin
+    return await services.invite_service.redeem(
+        plaintext_code=plaintext_code,
+        telegram_user_id=telegram_user_id,
+        telegram_private_chat_id=telegram_private_chat_id,
+    )
 
 
 async def _show_dashboard(

@@ -1,6 +1,6 @@
 # Модель данных SQLite
 
-Статус: согласовано, версия 1.0
+Статус: согласовано, версия 1.1
 Связанный документ: [Архитектура](architecture.md)
 
 ## 1. Соглашения
@@ -30,6 +30,7 @@ erDiagram
     USERS ||--o{ PROCESSED_UPDATES : triggers
     SMOKING_SESSIONS ||--o{ MILESTONE_NOTIFICATIONS : bases
     INVITE_CODES o|--o| USERS : redeems
+    ADMIN_BOOTSTRAP_CODES o|--o| USERS : bootstraps
 ```
 
 ## 3. Таблицы
@@ -53,7 +54,22 @@ erDiagram
 | `updated_at_utc` | INTEGER | Audit. |
 
 Администратор не отделён в специальную таблицу: role достаточно для маленького
-приложения. Последнего активного администратора нельзя отозвать.
+приложения. Частичный unique index `role = 'admin'` допускает ровно одного
+администратора. Обычной операцией отзыва его удалить или отозвать нельзя.
+
+### `admin_bootstrap_codes`
+
+| Колонка | Тип | Правило |
+|---|---|---|
+| `slot` | INTEGER PK | Всегда `1`, singleton constraint. |
+| `code_digest` | TEXT | `UNIQUE NOT NULL`, HMAC-SHA256 hex. |
+| `created_at_utc` | INTEGER | Момент выдачи в терминал. |
+| `expires_at_utc` | INTEGER | Короткий срок первичной привязки. |
+
+Таблица содержит не более одного кода. Новый запуск до привязки выполняет
+upsert в `slot=1`, немедленно инвалидируя прежний код. Успешное погашение и
+создание единственного admin выполняются в одной транзакции, после чего строка
+удаляется. Открытый код в SQLite не попадает.
 
 ### `invite_codes`
 

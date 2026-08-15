@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +16,7 @@ from smoke_runner.domain.clock import UtcInstant
 from smoke_runner.domain.models import IntervalChange, SmokingSession, WakeEvent
 from smoke_runner.infrastructure.db.engine import SessionFactory
 from smoke_runner.infrastructure.db.models import (
+    AdminBootstrapCodeRow,
     DashboardStateRow,
     IntervalChangeRow,
     InviteCodeRow,
@@ -74,6 +76,11 @@ class DatabaseGateway:
     ) -> AuthenticatedUser:
         now_seconds = now.to_unix_seconds()
         async with self._session_factory() as session, session.begin():
+            current_admin = await session.scalar(select(UserRow).where(UserRow.role == "admin"))
+            if current_admin is not None and current_admin.telegram_user_id != telegram_user_id:
+                raise RuntimeError(
+                    "The database is already bound to a different Telegram administrator"
+                )
             row = await session.scalar(
                 select(UserRow).where(UserRow.telegram_user_id == telegram_user_id)
             )
@@ -111,8 +118,121 @@ class DatabaseGateway:
                         created_at_utc=now_seconds,
                     )
                 )
+            await session.execute(delete(AdminBootstrapCodeRow))
             await session.flush()
             return _authenticated(row)
+
+    async def issue_admin_bootstrap_code(
+        self,
+        *,
+        code_digest: str,
+        created_at: UtcInstant,
+        expires_at: UtcInstant,
+    ) -> bool:
+        """Replace the singleton code only while no administrator exists."""
+        async with self._session_factory() as session, session.begin():
+            admin_id = await session.scalar(
+                select(UserRow.id).where(UserRow.role == "admin").limit(1)
+            )
+            if admin_id is not None:
+                await session.execute(delete(AdminBootstrapCodeRow))
+                return False
+            statement = (
+                sqlite_insert(AdminBootstrapCodeRow)
+                .values(
+                    slot=1,
+                    code_digest=code_digest,
+                    created_at_utc=created_at.to_unix_seconds(),
+                    expires_at_utc=expires_at.to_unix_seconds(),
+                )
+                .on_conflict_do_update(
+                    index_elements=[AdminBootstrapCodeRow.slot],
+                    set_={
+                        "code_digest": code_digest,
+                        "created_at_utc": created_at.to_unix_seconds(),
+                        "expires_at_utc": expires_at.to_unix_seconds(),
+                    },
+                )
+            )
+            await session.execute(statement)
+            return True
+
+    async def redeem_admin_bootstrap_code(
+        self,
+        *,
+        code_digest: str,
+        telegram_user_id: int,
+        telegram_private_chat_id: int,
+        timezone_name: str,
+        now: UtcInstant,
+    ) -> AuthenticatedUser | None:
+        """Claim the singleton code and create the only administrator atomically."""
+        now_seconds = now.to_unix_seconds()
+        try:
+            async with self._session_factory() as session, session.begin():
+                admin_id = await session.scalar(
+                    select(UserRow.id).where(UserRow.role == "admin").limit(1)
+                )
+                if admin_id is not None:
+                    await session.execute(delete(AdminBootstrapCodeRow))
+                    return None
+                claimed = await session.scalar(
+                    delete(AdminBootstrapCodeRow)
+                    .where(
+                        AdminBootstrapCodeRow.slot == 1,
+                        AdminBootstrapCodeRow.code_digest == code_digest,
+                        AdminBootstrapCodeRow.expires_at_utc > now_seconds,
+                    )
+                    .returning(AdminBootstrapCodeRow.slot)
+                )
+                if claimed is None:
+                    return None
+
+                user = await session.scalar(
+                    select(UserRow).where(UserRow.telegram_user_id == telegram_user_id)
+                )
+                if user is None:
+                    user = UserRow(
+                        telegram_user_id=telegram_user_id,
+                        telegram_private_chat_id=telegram_private_chat_id,
+                        role="admin",
+                        status="active",
+                        timezone_name=timezone_name,
+                        milestone_notifications_enabled=True,
+                        ai_commentary_enabled=False,
+                        activated_at_utc=now_seconds,
+                        created_at_utc=now_seconds,
+                        updated_at_utc=now_seconds,
+                    )
+                    session.add(user)
+                    await session.flush()
+                else:
+                    user.telegram_private_chat_id = telegram_private_chat_id
+                    user.role = "admin"
+                    user.status = "active"
+                    user.revoked_at_utc = None
+                    user.updated_at_utc = now_seconds
+
+                has_interval = await session.scalar(
+                    select(IntervalChangeRow.id)
+                    .where(IntervalChangeRow.user_id == user.id)
+                    .limit(1)
+                )
+                if has_interval is None:
+                    session.add(
+                        IntervalChangeRow(
+                            user_id=user.id,
+                            effective_at_utc=user.activated_at_utc,
+                            interval_seconds=3600,
+                            display_unit="hour",
+                            created_at_utc=now_seconds,
+                        )
+                    )
+                await session.flush()
+                return _authenticated(user)
+        except IntegrityError:
+            # A concurrent claim or the unique single-admin index won the race.
+            return None
 
     async def find_active_user(self, telegram_user_id: int) -> AuthenticatedUser | None:
         async with self._session_factory() as session:

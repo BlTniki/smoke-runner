@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from datetime import timedelta
 from typing import cast
 
@@ -11,7 +12,11 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from smoke_runner.application.ports import TrackingUnitOfWork
-from smoke_runner.application.security import InviteService
+from smoke_runner.application.security import (
+    AdminBootstrapService,
+    InviteService,
+    IssuedAdminBootstrapCode,
+)
 from smoke_runner.application.tracking import TrackingService
 from smoke_runner.config import Settings
 from smoke_runner.domain.clock import SystemClock
@@ -39,11 +44,23 @@ async def run_polling(settings: Settings) -> None:
     session_factory = create_session_factory(engine)
     clock = SystemClock()
     gateway = DatabaseGateway(session_factory)
-    await gateway.bootstrap_admin(
-        telegram_user_id=settings.admin_telegram_user_id,
+    admin_bootstrap_service = AdminBootstrapService(
+        gateway,
+        pepper=settings.invite_pepper.get_secret_value(),
+        clock=clock,
+        ttl=timedelta(minutes=settings.admin_bootstrap_ttl_minutes),
         timezone_name=settings.default_timezone,
-        now=clock.now(),
     )
+    if settings.admin_telegram_user_id is not None:
+        await gateway.bootstrap_admin(
+            telegram_user_id=settings.admin_telegram_user_id,
+            timezone_name=settings.default_timezone,
+            now=clock.now(),
+        )
+    else:
+        issued_code = await admin_bootstrap_service.issue()
+        if issued_code is not None:
+            print(format_admin_bootstrap_notice(issued_code), file=sys.stderr, flush=True)
 
     def uow_factory() -> TrackingUnitOfWork:
         return cast(TrackingUnitOfWork, SqlAlchemyUnitOfWork(session_factory))
@@ -58,6 +75,7 @@ async def run_polling(settings: Settings) -> None:
     )
     services = BotServices(
         gateway=gateway,
+        admin_bootstrap_service=admin_bootstrap_service,
         invite_service=invite_service,
         tracking=tracking,
         screens=ScreenManager(gateway, clock),
@@ -78,3 +96,14 @@ async def run_polling(settings: Settings) -> None:
         )
     finally:
         await engine.dispose()
+
+
+def format_admin_bootstrap_notice(issued: IssuedAdminBootstrapCode) -> str:
+    expires = issued.expires_at.value.isoformat().replace("+00:00", "Z")
+    return (
+        "\n"
+        "Администратор ещё не привязан.\n"
+        "Отправь боту в личном чате одноразовый код:\n\n"
+        f"{issued.plaintext}\n\n"
+        f"Код действует до {expires}. После перезапуска будет создан новый код.\n"
+    )

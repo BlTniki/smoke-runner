@@ -26,3 +26,14 @@ def test_settings_reject_unknown_timezone(monkeypatch) -> None:
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_admin_telegram_id_is_optional(monkeypatch) -> None:
+    monkeypatch.setenv("SMOKE_RUNNER_BOT_TOKEN", "123456789:abcdefghijklmnopqrstuvwxyz")
+    monkeypatch.setenv("SMOKE_RUNNER_INVITE_PEPPER", "p" * 32)
+    monkeypatch.delenv("SMOKE_RUNNER_ADMIN_TELEGRAM_USER_ID", raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.admin_telegram_user_id is None
+    assert settings.admin_bootstrap_ttl_minutes == 30

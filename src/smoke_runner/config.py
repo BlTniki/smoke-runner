@@ -22,10 +22,11 @@ class Settings(BaseSettings):
 
     bot_token: SecretStr = Field(min_length=20)
     invite_pepper: SecretStr = Field(min_length=32)
-    admin_telegram_user_id: int = Field(gt=0)
+    admin_telegram_user_id: int | None = Field(default=None, gt=0)
     database_path: Path = Path("data/smoke-runner.sqlite3")
     default_timezone: str = "Europe/Moscow"
     invite_ttl_hours: int = Field(default=168, ge=1, le=24 * 30)
+    admin_bootstrap_ttl_minutes: int = Field(default=30, ge=5, le=24 * 60)
     polling_concurrency_limit: int = Field(default=20, ge=1, le=100)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 

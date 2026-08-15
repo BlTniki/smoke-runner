@@ -136,7 +136,7 @@ update marker, и предметную запись.
 
 ### WP-30. Bootstrap и приглашения
 
-Статус: завершено 2026-08-15.
+Статус: завершено 2026-08-15; terminal bootstrap добавлен 2026-08-15.
 
 - Pydantic settings;
 - bootstrap admin;

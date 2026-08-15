@@ -33,6 +33,12 @@ class ManagedUser:
     status: str
 
 
+@dataclass(frozen=True, slots=True)
+class IssuedAdminBootstrapCode:
+    plaintext: str
+    expires_at: UtcInstant
+
+
 class AccessGateway(Protocol):
     async def find_active_user(self, telegram_user_id: int) -> AuthenticatedUser | None: ...
 
@@ -46,6 +52,24 @@ class AccessGateway(Protocol):
     ) -> None: ...
 
     async def redeem_invite(
+        self,
+        *,
+        code_digest: str,
+        telegram_user_id: int,
+        telegram_private_chat_id: int,
+        timezone_name: str,
+        now: UtcInstant,
+    ) -> AuthenticatedUser | None: ...
+
+    async def issue_admin_bootstrap_code(
+        self,
+        *,
+        code_digest: str,
+        created_at: UtcInstant,
+        expires_at: UtcInstant,
+    ) -> bool: ...
+
+    async def redeem_admin_bootstrap_code(
         self,
         *,
         code_digest: str,
@@ -109,6 +133,63 @@ class InviteService:
         if not code:
             return None
         return await self._gateway.redeem_invite(
+            code_digest=self.digest(code),
+            telegram_user_id=telegram_user_id,
+            telegram_private_chat_id=telegram_private_chat_id,
+            timezone_name=self._timezone_name,
+            now=self._clock.now(),
+        )
+
+
+class AdminBootstrapService:
+    """Issue a terminal code and atomically bind the first Telegram administrator."""
+
+    def __init__(
+        self,
+        gateway: AccessGateway,
+        *,
+        pepper: str,
+        clock: Clock,
+        ttl: timedelta,
+        timezone_name: str,
+    ) -> None:
+        if len(pepper.encode()) < 32:
+            raise ValueError("Invite pepper must contain at least 32 bytes")
+        if ttl <= timedelta(0):
+            raise ValueError("Admin bootstrap TTL must be positive")
+        self._gateway = gateway
+        self._pepper = pepper.encode()
+        self._clock = clock
+        self._ttl = ttl
+        self._timezone_name = timezone_name
+
+    def digest(self, plaintext_code: str) -> str:
+        return hmac.new(self._pepper, plaintext_code.encode(), hashlib.sha256).hexdigest()
+
+    async def issue(self) -> IssuedAdminBootstrapCode | None:
+        now = self._clock.now()
+        expires_at = now + self._ttl
+        plaintext = "sr_admin_" + secrets.token_urlsafe(24)
+        issued = await self._gateway.issue_admin_bootstrap_code(
+            code_digest=self.digest(plaintext),
+            created_at=now,
+            expires_at=expires_at,
+        )
+        if not issued:
+            return None
+        return IssuedAdminBootstrapCode(plaintext=plaintext, expires_at=expires_at)
+
+    async def redeem(
+        self,
+        *,
+        plaintext_code: str,
+        telegram_user_id: int,
+        telegram_private_chat_id: int,
+    ) -> AuthenticatedUser | None:
+        code = plaintext_code.strip()
+        if not code.startswith("sr_admin_"):
+            return None
+        return await self._gateway.redeem_admin_bootstrap_code(
             code_digest=self.digest(code),
             telegram_user_id=telegram_user_id,
             telegram_private_chat_id=telegram_private_chat_id,

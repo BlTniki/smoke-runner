@@ -16,6 +16,7 @@ from smoke_runner.infrastructure.db.models import SmokingSessionRow, UserRow
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 EXPECTED_TABLES = {
+    "admin_bootstrap_codes",
     "alembic_version",
     "dashboard_state",
     "interval_changes",
@@ -44,7 +45,7 @@ def test_upgrade_on_empty_database_and_repeated_upgrade_are_idempotent(tmp_path:
         }
         revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
     assert EXPECTED_TABLES <= tables
-    assert revision == ("20260814_0001",)
+    assert revision == ("20260815_0002",)
 
 
 def test_partial_timeline_indexes_are_present(migrated_database: Path) -> None:
@@ -146,6 +147,29 @@ async def test_foreign_key_and_unique_constraints_are_enforced(db_engine) -> Non
                 created_at_utc=now,
                 updated_at_utc=now,
             )
+        )
+        with pytest.raises(IntegrityError):
+            await session.commit()
+
+
+async def test_database_rejects_a_second_administrator(db_engine) -> None:
+    session_factory = create_session_factory(db_engine)
+    now = 2_000_000_000
+    async with session_factory() as session:
+        session.add_all(
+            [
+                UserRow(
+                    telegram_user_id=value,
+                    telegram_private_chat_id=value,
+                    role="admin",
+                    status="active",
+                    timezone_name="UTC",
+                    activated_at_utc=now,
+                    created_at_utc=now,
+                    updated_at_utc=now,
+                )
+                for value in (10, 20)
+            ]
         )
         with pytest.raises(IntegrityError):
             await session.commit()

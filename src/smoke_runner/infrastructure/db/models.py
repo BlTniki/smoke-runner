@@ -34,6 +34,12 @@ class UserRow(Base):
     __table_args__ = (
         CheckConstraint("role IN ('admin', 'member')", name="role"),
         CheckConstraint("status IN ('active', 'revoked')", name="status"),
+        Index(
+            "uq_users_single_admin",
+            "role",
+            unique=True,
+            sqlite_where=text("role = 'admin'"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -74,6 +80,18 @@ class InviteCodeRow(Base):
     redeemed_at_utc: Mapped[int | None] = mapped_column(Integer)
     redeemed_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)
     revoked_at_utc: Mapped[int | None] = mapped_column(Integer)
+
+
+class AdminBootstrapCodeRow(Base):
+    """Singleton terminal-issued code used only for the first administrator."""
+
+    __tablename__ = "admin_bootstrap_codes"
+    __table_args__ = (CheckConstraint("slot = 1", name="singleton_slot"),)
+
+    slot: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code_digest: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    created_at_utc: Mapped[int] = mapped_column(Integer, nullable=False)
+    expires_at_utc: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class SmokingSessionRow(Base):
