@@ -20,13 +20,16 @@ from smoke_runner.application.security import (
 from smoke_runner.application.tracking import TrackingService
 from smoke_runner.config import Settings
 from smoke_runner.domain.clock import SystemClock
+from smoke_runner.infrastructure.ai_commentary import DisabledReportCommentator
 from smoke_runner.infrastructure.db.engine import create_database_engine, create_session_factory
 from smoke_runner.infrastructure.db.gateway import DatabaseGateway
 from smoke_runner.infrastructure.db.migrations import upgrade_database
 from smoke_runner.infrastructure.db.unit_of_work import SqlAlchemyUnitOfWork
+from smoke_runner.infrastructure.reports import ReportBuilder, ReportDeliveryStore
+from smoke_runner.infrastructure.scheduler import DurableScheduler, SchedulerStore
 from smoke_runner.infrastructure.telegram.middleware import PrivateAuthMiddleware
 from smoke_runner.infrastructure.telegram.routers import BotServices, build_router
-from smoke_runner.infrastructure.telegram.screens import ScreenManager
+from smoke_runner.infrastructure.telegram.screens import ScreenLocks, ScreenManager
 
 
 def run(settings: Settings) -> None:
@@ -73,13 +76,24 @@ async def run_polling(settings: Settings) -> None:
         ttl=timedelta(hours=settings.invite_ttl_hours),
         timezone_name=settings.default_timezone,
     )
+    scheduler_wakeup = asyncio.Event()
+    report_builder = ReportBuilder(gateway, DisabledReportCommentator())
+    screen_locks = ScreenLocks()
+    screens = ScreenManager(
+        gateway,
+        clock,
+        locks=screen_locks,
+        scheduler_wakeup=scheduler_wakeup,
+    )
     services = BotServices(
         gateway=gateway,
         admin_bootstrap_service=admin_bootstrap_service,
         invite_service=invite_service,
         tracking=tracking,
-        screens=ScreenManager(gateway, clock),
+        screens=screens,
         clock=clock,
+        scheduler_wakeup=scheduler_wakeup,
+        report_builder=report_builder,
     )
     router = build_router(services)
     middleware = PrivateAuthMiddleware(gateway)
@@ -89,12 +103,30 @@ async def run_polling(settings: Settings) -> None:
     dispatcher = Dispatcher(storage=MemoryStorage())
     dispatcher.include_router(router)
     bot = Bot(token=settings.bot_token.get_secret_value())
+    scheduler = DurableScheduler(
+        store=SchedulerStore(session_factory),
+        gateway=gateway,
+        bot=bot,
+        clock=clock,
+        wakeup=scheduler_wakeup,
+        screen_locks=screen_locks,
+        report_store=ReportDeliveryStore(session_factory),
+        report_builder=report_builder,
+    )
     try:
-        await dispatcher.start_polling(
-            bot,
-            tasks_concurrency_limit=settings.polling_concurrency_limit,
-        )
+        await scheduler.recover()
+        async with asyncio.TaskGroup() as tasks:
+            tasks.create_task(scheduler.run(), name="durable-scheduler")
+            try:
+                await dispatcher.start_polling(
+                    bot,
+                    tasks_concurrency_limit=settings.polling_concurrency_limit,
+                    close_bot_session=False,
+                )
+            finally:
+                scheduler.stop()
     finally:
+        await bot.session.close()
         await engine.dispose()
 
 

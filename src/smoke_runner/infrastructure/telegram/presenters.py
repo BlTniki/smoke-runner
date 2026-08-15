@@ -137,14 +137,14 @@ def format_duration(value: timedelta) -> str:
     total = max(0, int(value.total_seconds()))
     days, remainder = divmod(total, 86_400)
     hours, remainder = divmod(remainder, 3_600)
-    minutes, seconds = divmod(remainder, 60)
+    minutes, _seconds = divmod(remainder, 60)
     parts: list[str] = []
     if days:
         parts.append(f"{days} дн")
     if hours:
         parts.append(f"{hours} ч")
-    if minutes or (not days and not hours):
+    if minutes:
         parts.append(f"{minutes} мин")
-    if not days and not hours and total < 10 * 60:
-        parts.append(f"{seconds} сек")
+    if not parts:
+        parts.append("меньше 1 мин")
     return " ".join(parts)

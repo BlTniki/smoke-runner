@@ -53,6 +53,13 @@ class ChangeIntervalCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class SetMilestoneNotificationsCommand:
+    user_id: int
+    telegram_update_id: int
+    enabled: bool
+
+
+@dataclass(frozen=True, slots=True)
 class MutationResult:
     applied: bool
     record_id: int | None

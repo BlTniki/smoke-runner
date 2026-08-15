@@ -46,6 +46,13 @@ class SqlAlchemyUserRepository:
             milestone_notifications_enabled=row.milestone_notifications_enabled,
         )
 
+    async def set_milestone_notifications(self, user_id: int, enabled: bool) -> None:
+        await self._session.execute(
+            update(UserRow)
+            .where(UserRow.id == user_id, UserRow.status == "active")
+            .values(milestone_notifications_enabled=enabled)
+        )
+
 
 class SqlAlchemyProcessedUpdateRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -282,7 +289,7 @@ class SqlAlchemyMilestoneRepository:
             update(MilestoneNotificationRow)
             .where(
                 MilestoneNotificationRow.user_id == user_id,
-                MilestoneNotificationRow.status == "pending",
+                MilestoneNotificationRow.status.in_(("pending", "claimed")),
             )
             .values(status="superseded", updated_at_utc=now_seconds)
         )

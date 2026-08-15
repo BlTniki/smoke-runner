@@ -12,6 +12,7 @@ from smoke_runner.application.models import (
     EditEventCommand,
     EventSource,
     LogEventCommand,
+    SetMilestoneNotificationsCommand,
 )
 from smoke_runner.application.tracking import (
     RecordNotFoundError,
@@ -261,3 +262,39 @@ async def test_wake_replace_edit_delete_and_one_per_local_date(db_engine) -> Non
         failed_marker = await session.get(ProcessedUpdateRow, 2)
     assert active_count == 0
     assert failed_marker is None
+
+
+async def test_notification_setting_is_idempotent_and_rebuilds_pending_milestone(
+    db_engine,
+) -> None:
+    session_factory = create_session_factory(db_engine)
+    user_id = await seed_user(session_factory, telegram_id=10)
+    clock = MutableClock(UtcInstant.from_unix_seconds(2_000_000_100))
+    service = tracking_service(session_factory, clock)
+    await service.log_session(LogEventCommand(user_id, 1, clock.current, EventSource.NOW))
+
+    disabled = SetMilestoneNotificationsCommand(user_id, 2, False)
+    assert (await service.set_milestone_notifications(disabled)).applied
+    assert not (await service.set_milestone_notifications(disabled)).applied
+    async with session_factory() as session:
+        user = await session.get(UserRow, user_id)
+        pending_count = await session.scalar(
+            select(func.count())
+            .select_from(MilestoneNotificationRow)
+            .where(MilestoneNotificationRow.status == "pending")
+        )
+    assert user is not None and not user.milestone_notifications_enabled
+    assert pending_count == 0
+
+    assert (
+        await service.set_milestone_notifications(
+            SetMilestoneNotificationsCommand(user_id, 3, True)
+        )
+    ).applied
+    async with session_factory() as session:
+        pending_count = await session.scalar(
+            select(func.count())
+            .select_from(MilestoneNotificationRow)
+            .where(MilestoneNotificationRow.status == "pending")
+        )
+    assert pending_count == 1

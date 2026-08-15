@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -11,7 +12,7 @@ from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart, Filter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message, TelegramObject, Update
+from aiogram.types import BufferedInputFile, CallbackQuery, Message, TelegramObject, Update
 
 from smoke_runner.application.models import (
     ChangeIntervalCommand,
@@ -19,6 +20,7 @@ from smoke_runner.application.models import (
     EditEventCommand,
     EventSource,
     LogEventCommand,
+    SetMilestoneNotificationsCommand,
 )
 from smoke_runner.application.security import (
     AdminBootstrapService,
@@ -41,8 +43,15 @@ from smoke_runner.domain.local_time import (
     resolve_local_datetime,
 )
 from smoke_runner.domain.models import TargetInterval
+from smoke_runner.domain.report_models import WeeklyReportSnapshot
 from smoke_runner.domain.timeline import build_timeline
 from smoke_runner.infrastructure.db.gateway import DatabaseGateway, HistoryKind
+from smoke_runner.infrastructure.report_rendering import (
+    render_current_week_chart,
+    render_history_chart,
+    render_report_text,
+)
+from smoke_runner.infrastructure.reports import ReportBuilder, ReportUnavailableError
 from smoke_runner.infrastructure.telegram.keyboards import (
     ambiguous_time_keyboard,
     backfill_date_keyboard,
@@ -55,6 +64,7 @@ from smoke_runner.infrastructure.telegram.keyboards import (
     interval_units_keyboard,
     interval_values_keyboard,
     record_keyboard,
+    reports_keyboard,
 )
 from smoke_runner.infrastructure.telegram.presenters import (
     format_interval,
@@ -75,6 +85,8 @@ class BotServices:
     tracking: TrackingService
     screens: ScreenManager
     clock: Clock
+    scheduler_wakeup: asyncio.Event
+    report_builder: ReportBuilder
 
 
 class Authenticated(Filter):
@@ -256,6 +268,7 @@ def build_router(services: BotServices) -> Router:
                         source=EventSource.NOW,
                     )
                 )
+                services.scheduler_wakeup.set()
                 if result.record_id is not None:
                     await _show_feedback(
                         services,
@@ -275,6 +288,7 @@ def build_router(services: BotServices) -> Router:
                         source=EventSource.NOW,
                     )
                 )
+                services.scheduler_wakeup.set()
                 await _show_dashboard(
                     services,
                     bot,
@@ -422,6 +436,7 @@ def build_router(services: BotServices) -> Router:
                     command,
                     replace_existing=kind in {"replacewake", "replacewake-now"},
                 )
+                services.scheduler_wakeup.set()
                 await _show_dashboard(
                     services,
                     bot,
@@ -431,6 +446,7 @@ def build_router(services: BotServices) -> Router:
                 )
             else:
                 result = await services.tracking.log_session(command)
+                services.scheduler_wakeup.set()
                 if result.record_id is not None:
                     await _show_feedback(
                         services,
@@ -575,6 +591,7 @@ def build_router(services: BotServices) -> Router:
                 await services.tracking.edit_session(command)
             else:
                 await services.tracking.edit_wake(command)
+            services.scheduler_wakeup.set()
             await _show_record(
                 services,
                 bot,
@@ -630,6 +647,7 @@ def build_router(services: BotServices) -> Router:
                 await services.tracking.delete_session(command)
             else:
                 await services.tracking.delete_wake(command)
+            services.scheduler_wakeup.set()
             await _show_history(services, bot, auth_user, _callback_chat_id(callback), offset=0)
         except RecordNotFoundError:
             await _show_error(
@@ -653,6 +671,7 @@ def build_router(services: BotServices) -> Router:
                     record_id=record_id,
                 )
             )
+            services.scheduler_wakeup.set()
             await _show_dashboard(
                 services,
                 bot,
@@ -709,6 +728,7 @@ def build_router(services: BotServices) -> Router:
                 interval=interval,
             )
         )
+        services.scheduler_wakeup.set()
         await _show_dashboard(
             services,
             bot,
@@ -721,19 +741,25 @@ def build_router(services: BotServices) -> Router:
     async def toggle_notifications(
         callback: CallbackQuery,
         auth_user: AuthenticatedUser,
+        event_update: Update,
         bot: Bot,
     ) -> None:
         await callback.answer()
         facts = await services.gateway.dashboard_facts(auth_user.id)
         if facts is None:
             return
-        await services.gateway.set_milestone_notifications(
-            auth_user.id, not facts.user.milestone_notifications_enabled
+        await services.tracking.set_milestone_notifications(
+            SetMilestoneNotificationsCommand(
+                user_id=auth_user.id,
+                telegram_update_id=event_update.update_id,
+                enabled=not facts.user.milestone_notifications_enabled,
+            )
         )
+        services.scheduler_wakeup.set()
         await _show_settings(services, bot, auth_user, _callback_chat_id(callback))
 
     @router.callback_query(Authenticated(), F.data == "reports")
-    async def reports_placeholder(
+    async def reports(
         callback: CallbackQuery,
         auth_user: AuthenticatedUser,
         bot: Bot,
@@ -743,10 +769,57 @@ def build_router(services: BotServices) -> Router:
             bot=bot,
             user=auth_user,
             chat_id=_callback_chat_id(callback),
-            text="Отчёты появятся на следующем этапе. Уже сохранённые данные в них попадут.",
-            reply_markup=dashboard_keyboard(),
+            text=(
+                "Отчёты приходят автоматически в 09:00. Здесь можно заново построить "
+                "последний завершённый период по актуальным данным."
+            ),
+            reply_markup=reports_keyboard(),
             screen_kind="report",
         )
+
+    @router.callback_query(Authenticated(), F.data.startswith("report:"))
+    async def build_report_now(
+        callback: CallbackQuery,
+        auth_user: AuthenticatedUser,
+        bot: Bot,
+    ) -> None:
+        await callback.answer("Готовлю отчёт…")
+        report_type = (callback.data or "").split(":", 1)[1]
+        try:
+            if report_type == "daily":
+                report = await services.report_builder.build_latest_daily(
+                    auth_user.id,
+                    generated_at=services.clock.now(),
+                )
+            else:
+                report = await services.report_builder.build_latest_weekly(
+                    auth_user.id,
+                    generated_at=services.clock.now(),
+                )
+        except ReportUnavailableError as error:
+            await bot.send_message(chat_id=_callback_chat_id(callback), text=str(error))
+            return
+        await bot.send_message(
+            chat_id=_callback_chat_id(callback),
+            text=render_report_text(report.snapshot, commentary=report.commentary),
+        )
+        if report_type == "weekly":
+            if not isinstance(report.snapshot, WeeklyReportSnapshot):
+                raise RuntimeError("Weekly report builder returned a daily snapshot")
+            current_chart, history_chart = await asyncio.gather(
+                asyncio.to_thread(render_current_week_chart, report.snapshot),
+                asyncio.to_thread(render_history_chart, report.snapshot),
+            )
+            await bot.send_photo(
+                chat_id=_callback_chat_id(callback),
+                photo=BufferedInputFile(current_chart, filename="week-by-day.png"),
+                caption="Неделя по дням",
+            )
+            await bot.send_photo(
+                chat_id=_callback_chat_id(callback),
+                photo=BufferedInputFile(history_chart, filename="history-by-week.png"),
+                caption="Весь период по неделям",
+            )
 
     return router
 
@@ -790,6 +863,7 @@ async def _show_dashboard(
         text=prefix + render_dashboard(facts, services.clock.now()),
         reply_markup=dashboard_keyboard(),
         screen_kind="dashboard",
+        target_at=build_timeline(list(facts.sessions), list(facts.intervals)).current_target_at,
     )
 
 
@@ -823,6 +897,7 @@ async def _show_feedback(
         text=text,
         reply_markup=feedback_keyboard(record_id),
         screen_kind="dashboard",
+        target_at=timeline.current_target_at,
     )
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from zoneinfo import ZoneInfo
 
 from smoke_runner.application.models import (
@@ -10,6 +11,7 @@ from smoke_runner.application.models import (
     EditEventCommand,
     LogEventCommand,
     MutationResult,
+    SetMilestoneNotificationsCommand,
     UserContext,
 )
 from smoke_runner.application.ports import TrackingUnitOfWork, TrackingUnitOfWorkFactory
@@ -185,10 +187,28 @@ class TrackingService:
             await self._rebuild_milestone(uow, user, now)
             return MutationResult(applied=True, record_id=interval.id)
 
+    async def set_milestone_notifications(
+        self,
+        command: SetMilestoneNotificationsCommand,
+    ) -> MutationResult:
+        now = self._clock.now()
+        async with self._uow_factory() as uow:
+            user = await self._claim_and_get_user(uow, command, now)
+            if user is None:
+                return MutationResult(applied=False, record_id=None)
+            await uow.users.set_milestone_notifications(user.id, command.enabled)
+            updated_user = replace(user, milestone_notifications_enabled=command.enabled)
+            await self._rebuild_milestone(uow, updated_user, now)
+            return MutationResult(applied=True, record_id=None)
+
     async def _claim_and_get_user(
         self,
         uow: TrackingUnitOfWork,
-        command: LogEventCommand | EditEventCommand | DeleteEventCommand | ChangeIntervalCommand,
+        command: LogEventCommand
+        | EditEventCommand
+        | DeleteEventCommand
+        | ChangeIntervalCommand
+        | SetMilestoneNotificationsCommand,
         now: UtcInstant,
     ) -> UserContext | None:
         claimed = await uow.processed_updates.claim(

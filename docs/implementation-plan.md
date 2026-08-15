@@ -1,6 +1,6 @@
 # План реализации
 
-Статус: согласовано, этапы 0–3 завершены, этап 4 не начат, версия 1.0
+Статус: согласовано, этапы 0–5 завершены, этап 6 не начат, версия 1.0
 Основание: требования 1.2, архитектура 1.1
 
 ## 1. Принцип исполнения
@@ -179,6 +179,8 @@ Security acceptance:
 
 ### WP-40. Durable scheduler loop
 
+Статус: завершено 2026-08-15.
+
 - nearest-due sleep + asyncio wake event;
 - claim/recovery/heartbeat;
 - milestone rows и supersede;
@@ -194,6 +196,8 @@ Security acceptance:
 
 ### WP-41. Active dashboard refresh
 
+Статус: завершено 2026-08-15.
+
 - refresh раз в 5 минут;
 - active window 30 минут;
 - immediate event/target refresh;
@@ -205,6 +209,8 @@ Security acceptance:
 
 ### WP-50. Daily report
 
+Статус: завершено 2026-08-15.
+
 - Sunday-independent daily boundary в user timezone;
 - 09:00 delivery;
 - сравнение с предыдущим днём;
@@ -213,6 +219,8 @@ Security acceptance:
 
 ### WP-51. Weekly report
 
+Статус: завершено 2026-08-15.
+
 - Sunday–Saturday boundary;
 - first partial week;
 - core и дополнительные метрики;
@@ -220,6 +228,8 @@ Security acceptance:
 - две chart specs.
 
 ### WP-52. Matplotlib renderer
+
+Статус: завершено 2026-08-15.
 
 - Agg backend;
 - PNG в memory buffer;
@@ -232,6 +242,8 @@ Security acceptance:
 fixtures плюс ручной просмотр на телефоне.
 
 ### WP-53. Report delivery recovery
+
+Статус: завершено 2026-08-15.
 
 - unique deliveries;
 - immutable snapshot и отдельные text/chart delivery parts;

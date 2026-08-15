@@ -37,6 +37,7 @@ class DashboardFacts:
     wakes: tuple[WakeEvent, ...]
     intervals: tuple[IntervalChange, ...]
     last_feedback_template_key: str | None
+    ai_commentary_enabled: bool = False
 
 
 class HistoryKind(StrEnum):
@@ -59,6 +60,8 @@ class DashboardState:
     telegram_chat_id: int
     telegram_message_id: int | None
     screen_kind: str
+    active_until: UtcInstant | None
+    next_refresh_at: UtcInstant | None
 
 
 class DatabaseGateway:
@@ -401,6 +404,7 @@ class DatabaseGateway:
                 ),
                 intervals=tuple(_to_interval_change(row) for row in interval_rows),
                 last_feedback_template_key=user.last_feedback_template_key,
+                ai_commentary_enabled=user.ai_commentary_enabled,
             )
 
     async def set_feedback_template_key(self, user_id: int, key: str) -> None:
@@ -409,14 +413,6 @@ class DatabaseGateway:
                 update(UserRow)
                 .where(UserRow.id == user_id, UserRow.status == "active")
                 .values(last_feedback_template_key=key)
-            )
-
-    async def set_milestone_notifications(self, user_id: int, enabled: bool) -> None:
-        async with self._session_factory() as session, session.begin():
-            await session.execute(
-                update(UserRow)
-                .where(UserRow.id == user_id, UserRow.status == "active")
-                .values(milestone_notifications_enabled=enabled)
             )
 
     async def history(
@@ -525,6 +521,16 @@ class DatabaseGateway:
                 telegram_chat_id=row.telegram_chat_id,
                 telegram_message_id=row.telegram_message_id,
                 screen_kind=row.screen_kind,
+                active_until=(
+                    None
+                    if row.active_until_utc is None
+                    else UtcInstant.from_unix_seconds(row.active_until_utc)
+                ),
+                next_refresh_at=(
+                    None
+                    if row.next_refresh_at_utc is None
+                    else UtcInstant.from_unix_seconds(row.next_refresh_at_utc)
+                ),
             )
 
     async def save_dashboard_state(
@@ -535,6 +541,8 @@ class DatabaseGateway:
         telegram_message_id: int,
         screen_kind: str,
         now: UtcInstant,
+        active_until: UtcInstant | None,
+        next_refresh_at: UtcInstant | None,
     ) -> None:
         async with self._session_factory() as session, session.begin():
             row = await session.get(DashboardStateRow, user_id)
@@ -545,6 +553,12 @@ class DatabaseGateway:
                         telegram_chat_id=telegram_chat_id,
                         telegram_message_id=telegram_message_id,
                         screen_kind=screen_kind,
+                        active_until_utc=(
+                            None if active_until is None else active_until.to_unix_seconds()
+                        ),
+                        next_refresh_at_utc=(
+                            None if next_refresh_at is None else next_refresh_at.to_unix_seconds()
+                        ),
                         updated_at_utc=now.to_unix_seconds(),
                     )
                 )
@@ -552,6 +566,12 @@ class DatabaseGateway:
                 row.telegram_chat_id = telegram_chat_id
                 row.telegram_message_id = telegram_message_id
                 row.screen_kind = screen_kind
+                row.active_until_utc = (
+                    None if active_until is None else active_until.to_unix_seconds()
+                )
+                row.next_refresh_at_utc = (
+                    None if next_refresh_at is None else next_refresh_at.to_unix_seconds()
+                )
                 row.updated_at_utc = now.to_unix_seconds()
 
 

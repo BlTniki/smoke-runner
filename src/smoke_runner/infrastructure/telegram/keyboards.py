@@ -24,6 +24,16 @@ def dashboard_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def reports_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Вчерашний отчёт", callback_data="report:daily")],
+            [InlineKeyboardButton(text="Последняя неделя", callback_data="report:weekly")],
+            [InlineKeyboardButton(text="← На главную", callback_data="dashboard")],
+        ]
+    )
+
+
 def backfill_kind_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
