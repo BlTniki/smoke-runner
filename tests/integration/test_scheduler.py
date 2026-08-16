@@ -37,6 +37,7 @@ class FakeBot:
     def __init__(self) -> None:
         self.sent_texts: list[str] = []
         self.edited_texts: list[str] = []
+        self.deleted_message_ids: list[int] = []
         self.next_message_id = 100
 
     async def send_message(self, **kwargs):
@@ -46,6 +47,9 @@ class FakeBot:
 
     async def edit_message_text(self, **kwargs):
         self.edited_texts.append(str(kwargs["text"]))
+
+    async def delete_message(self, **kwargs):
+        self.deleted_message_ids.append(int(kwargs["message_id"]))
 
 
 async def make_scheduler(db_engine, clock: MutableClock):
@@ -97,7 +101,8 @@ async def test_early_session_supersedes_old_milestone_and_only_new_target_sends(
     clock.value = first + timedelta(minutes=90)
     await scheduler.tick()
     await scheduler.tick()
-    assert len(bot.sent_texts) == 1
+    assert sum("Теперь можешь покурить спокойно" in text for text in bot.sent_texts) == 1
+    assert bot.sent_texts[-1].startswith("Твой режим")
 
 
 async def test_small_lateness_keeps_target_grid_in_persisted_milestone(db_engine) -> None:
@@ -180,8 +185,8 @@ async def test_recovery_delivers_pending_milestone_within_fifteen_minute_window(
     await scheduler.recover()
     await scheduler.tick()
 
-    assert len(bot.sent_texts) == 1
-    assert "Теперь можешь покурить спокойно" in bot.sent_texts[0]
+    assert sum("Теперь можешь покурить спокойно" in text for text in bot.sent_texts) == 1
+    assert bot.sent_texts[-1].startswith("Твой режим")
 
 
 async def test_new_session_supersedes_even_an_already_claimed_milestone(db_engine) -> None:
@@ -233,7 +238,9 @@ async def test_active_dashboard_refreshes_at_target_then_stops_on_history(db_eng
     )
     clock.value = target + timedelta(minutes=10)
     await scheduler.tick()
-    assert len(bot.edited_texts) == 2  # one scheduler edit and one foreground history edit
+    assert len(bot.edited_texts) == 1
+    assert bot.sent_texts[-1] == "history"
+    assert bot.deleted_message_ids == [101]
     state = await gateway.get_dashboard_state(admin.id)
     assert state is not None
     assert state.screen_kind == "history"

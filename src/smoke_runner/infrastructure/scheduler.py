@@ -45,6 +45,7 @@ from smoke_runner.infrastructure.telegram.presenters import render_dashboard
 from smoke_runner.infrastructure.telegram.screens import (
     DASHBOARD_REFRESH_INTERVAL,
     ScreenLocks,
+    ScreenManager,
     next_dashboard_refresh,
 )
 
@@ -422,6 +423,7 @@ class DurableScheduler:
         clock: Clock,
         wakeup: asyncio.Event,
         screen_locks: ScreenLocks,
+        screen_manager: ScreenManager | None = None,
         report_store: ReportDeliveryStore | None = None,
         report_builder: ReportBuilder | None = None,
     ) -> None:
@@ -431,6 +433,12 @@ class DurableScheduler:
         self._clock = clock
         self._wakeup = wakeup
         self._screen_locks = screen_locks
+        self._screen_manager = screen_manager or ScreenManager(
+            gateway,
+            clock,
+            locks=screen_locks,
+            scheduler_wakeup=wakeup,
+        )
         self._report_store = report_store
         self._report_builder = report_builder
         self._stopping = False
@@ -501,7 +509,7 @@ class DurableScheduler:
             telegram_message_id=message.message_id,
             now=now,
         )
-        await self._store.make_dashboard_due(work.user_id, now)
+        await self._bump_dashboard(work.user_id, work.telegram_chat_id)
 
     async def _refresh_dashboard(self, work: DashboardWork) -> None:
         async with self._screen_locks.for_user(work.user.id):
@@ -576,6 +584,8 @@ class DurableScheduler:
         while part := await self._report_store.claim_next_part(work.id, now=self._clock.now()):
             if not await self._send_report_part(work, part, snapshot, commentary):
                 return
+        if await self._report_store.delivery_status(work.id) == "sent":
+            await self._bump_dashboard(work.user_id, work.telegram_chat_id)
 
     async def _send_report_part(
         self,
@@ -624,3 +634,20 @@ class DurableScheduler:
             now=self._clock.now(),
         )
         return True
+
+    async def _bump_dashboard(self, user_id: int, chat_id: int) -> None:
+        facts = await self._gateway.dashboard_facts(user_id)
+        if facts is None:
+            return
+        timeline = build_timeline(list(facts.sessions), list(facts.intervals))
+        try:
+            await self._screen_manager.bump_dashboard(
+                bot=self._bot,
+                user_id=user_id,
+                chat_id=chat_id,
+                text=render_dashboard(facts, self._clock.now()),
+                reply_markup=dashboard_keyboard(),
+                target_at=timeline.current_target_at,
+            )
+        except TelegramAPIError:
+            LOGGER.warning("Dashboard bump failed", extra={"user_id": user_id})

@@ -110,6 +110,7 @@ async def run_polling(settings: Settings) -> None:
         clock=clock,
         wakeup=scheduler_wakeup,
         screen_locks=screen_locks,
+        screen_manager=screens,
         report_store=ReportDeliveryStore(session_factory),
         report_builder=report_builder,
     )

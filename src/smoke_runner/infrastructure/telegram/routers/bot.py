@@ -798,6 +798,12 @@ def build_router(services: BotServices) -> Router:
                 )
         except ReportUnavailableError as error:
             await bot.send_message(chat_id=_callback_chat_id(callback), text=str(error))
+            await _bump_dashboard(
+                services,
+                bot,
+                auth_user,
+                _callback_chat_id(callback),
+            )
             return
         await bot.send_message(
             chat_id=_callback_chat_id(callback),
@@ -820,6 +826,12 @@ def build_router(services: BotServices) -> Router:
                 photo=BufferedInputFile(history_chart, filename="history-by-week.png"),
                 caption="Весь период по неделям",
             )
+        await _bump_dashboard(
+            services,
+            bot,
+            auth_user,
+            _callback_chat_id(callback),
+        )
 
     return router
 
@@ -864,6 +876,26 @@ async def _show_dashboard(
         reply_markup=dashboard_keyboard(),
         screen_kind="dashboard",
         target_at=build_timeline(list(facts.sessions), list(facts.intervals)).current_target_at,
+    )
+
+
+async def _bump_dashboard(
+    services: BotServices,
+    bot: Bot,
+    user: AuthenticatedUser,
+    chat_id: int,
+) -> None:
+    facts = await services.gateway.dashboard_facts(user.id)
+    if facts is None:
+        return
+    timeline = build_timeline(list(facts.sessions), list(facts.intervals))
+    await services.screens.bump_dashboard(
+        bot=bot,
+        user_id=user.id,
+        chat_id=chat_id,
+        text=render_dashboard(facts, services.clock.now()),
+        reply_markup=dashboard_keyboard(),
+        target_at=timeline.current_target_at,
     )
 
 

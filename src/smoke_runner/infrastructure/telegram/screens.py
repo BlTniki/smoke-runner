@@ -6,7 +6,7 @@ import asyncio
 from datetime import timedelta
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError
 from aiogram.types import InlineKeyboardMarkup
 
 from smoke_runner.application.security import AuthenticatedUser
@@ -52,25 +52,55 @@ class ScreenManager:
         screen_kind: str,
         target_at: UtcInstant | None = None,
     ) -> int:
-        async with self._locks.for_user(user.id):
-            state = await self._gateway.get_dashboard_state(user.id)
-            message_id = state.telegram_message_id if state is not None else None
-            if message_id is not None and state is not None and state.telegram_chat_id == chat_id:
-                try:
-                    await bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=message_id,
-                        text=text,
-                        reply_markup=reply_markup,
-                    )
-                except TelegramBadRequest as error:
-                    if "message is not modified" not in error.message.lower():
-                        message_id = None
-            if message_id is None:
-                message = await bot.send_message(
-                    chat_id=chat_id, text=text, reply_markup=reply_markup
-                )
-                message_id = message.message_id
+        return await self._replace(
+            bot=bot,
+            user_id=user.id,
+            chat_id=chat_id,
+            text=text,
+            reply_markup=reply_markup,
+            screen_kind=screen_kind,
+            target_at=target_at,
+        )
+
+    async def bump_dashboard(
+        self,
+        *,
+        bot: Bot,
+        user_id: int,
+        chat_id: int,
+        text: str,
+        reply_markup: InlineKeyboardMarkup,
+        target_at: UtcInstant | None,
+    ) -> int:
+        """Place a fresh dashboard after standalone Telegram messages."""
+        return await self._replace(
+            bot=bot,
+            user_id=user_id,
+            chat_id=chat_id,
+            text=text,
+            reply_markup=reply_markup,
+            screen_kind="dashboard",
+            target_at=target_at,
+        )
+
+    async def _replace(
+        self,
+        *,
+        bot: Bot,
+        user_id: int,
+        chat_id: int,
+        text: str,
+        reply_markup: InlineKeyboardMarkup,
+        screen_kind: str,
+        target_at: UtcInstant | None,
+    ) -> int:
+        async with self._locks.for_user(user_id):
+            state = await self._gateway.get_dashboard_state(user_id)
+            old_message_id = None
+            if state is not None and state.telegram_chat_id == chat_id:
+                old_message_id = state.telegram_message_id
+            message = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+            message_id = message.message_id
 
             now = self._clock.now()
             active_until: UtcInstant | None = None
@@ -79,7 +109,7 @@ class ScreenManager:
                 active_until = now + DASHBOARD_ACTIVE_WINDOW
                 next_refresh = next_dashboard_refresh(now, active_until, target_at)
             await self._gateway.save_dashboard_state(
-                user_id=user.id,
+                user_id=user_id,
                 telegram_chat_id=chat_id,
                 telegram_message_id=message_id,
                 screen_kind=screen_kind,
@@ -87,6 +117,13 @@ class ScreenManager:
                 active_until=active_until,
                 next_refresh_at=next_refresh,
             )
+            if old_message_id is not None and old_message_id != message_id:
+                try:
+                    await bot.delete_message(chat_id=chat_id, message_id=old_message_id)
+                except TelegramAPIError:
+                    # The fresh dashboard is already last and durable; an undeletable
+                    # older screen is harmless (for example after Telegram's age limit).
+                    pass
         if self._scheduler_wakeup is not None:
             self._scheduler_wakeup.set()
         return message_id

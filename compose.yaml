@@ -1,0 +1,46 @@
+name: smoke-runner
+
+services:
+  bot:
+    build:
+      context: .
+    image: smoke-runner:local
+    container_name: smoke-runner-bot
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      MPLCONFIGDIR: /tmp/matplotlib
+      SMOKE_RUNNER_DATABASE_PATH: /data/smoke-runner.sqlite3
+    volumes:
+      - ./data:/data
+    network_mode: bridge
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 384m
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import sqlite3,time;
+          connection=sqlite3.connect('file:/data/smoke-runner.sqlite3?mode=ro',uri=True);
+          row=connection.execute("SELECT value FROM runtime_state WHERE key='scheduler_heartbeat_at_utc'").fetchone();
+          raise SystemExit(0 if row and time.time()-int(row[0])<90 else 1)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

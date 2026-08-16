@@ -36,6 +36,7 @@ class ReportBot:
     def __init__(self) -> None:
         self.sent_texts: list[str] = []
         self.sent_photos: list[tuple[str, bytes]] = []
+        self.deleted_message_ids: list[int] = []
         self.next_message_id = 100
 
     async def send_message(self, **kwargs):
@@ -51,6 +52,9 @@ class ReportBot:
 
     async def edit_message_text(self, **kwargs):
         del kwargs
+
+    async def delete_message(self, **kwargs):
+        self.deleted_message_ids.append(int(kwargs["message_id"]))
 
 
 async def make_report_scheduler(db_engine, *, activated_at: UtcInstant, now: UtcInstant):
@@ -99,9 +103,11 @@ async def test_daily_report_is_sent_at_nine_and_not_duplicated(db_engine) -> Non
     await scheduler.tick()
     await scheduler.tick()
 
-    assert len(bot.sent_texts) == 1
-    assert "Ежедневный отчёт · 14.08.2026" in bot.sent_texts[0]
-    assert "Эпизоды: 2" in bot.sent_texts[0]
+    reports = [text for text in bot.sent_texts if text.startswith("📊")]
+    assert len(reports) == 1
+    assert "Ежедневный отчёт · 14.08.2026" in reports[0]
+    assert "Эпизоды: 2" in reports[0]
+    assert bot.sent_texts[-1].startswith("Твой режим")
     async with session_factory() as session:
         delivery = await session.scalar(select(ReportDeliveryRow))
         parts = (await session.scalars(select(ReportDeliveryPartRow))).all()
@@ -127,9 +133,11 @@ async def test_sunday_sends_daily_then_weekly_and_two_png_charts(db_engine) -> N
     await scheduler.recover()
     await scheduler.tick()
 
-    assert len(bot.sent_texts) == 2
-    assert bot.sent_texts[0].startswith("📊 Ежедневный отчёт")
-    assert bot.sent_texts[1].startswith("📈 Еженедельный отчёт")
+    reports = [text for text in bot.sent_texts if text.startswith(("📊", "📈"))]
+    assert len(reports) == 2
+    assert reports[0].startswith("📊 Ежедневный отчёт")
+    assert reports[1].startswith("📈 Еженедельный отчёт")
+    assert bot.sent_texts[-1].startswith("Твой режим")
     assert [caption for caption, _ in bot.sent_photos] == [
         "Неделя по дням",
         "Весь период по неделям",
@@ -203,7 +211,9 @@ async def test_restart_retries_unknown_report_part_once_from_immutable_snapshot(
     await report_store.recover(at(15, 9) + timedelta(seconds=1))
     await scheduler.tick()
 
-    assert len(bot.sent_texts) == 1
+    reports = [text for text in bot.sent_texts if text.startswith("📊")]
+    assert len(reports) == 1
+    assert bot.sent_texts[-1].startswith("Твой режим")
     async with session_factory() as session:
         delivery = await session.get(ReportDeliveryRow, work.id)
         stored_part = await session.get(ReportDeliveryPartRow, part.id)

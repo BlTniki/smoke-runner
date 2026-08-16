@@ -35,6 +35,7 @@ class FakeBot:
     def __init__(self) -> None:
         self.sent = 0
         self.edited: list[int] = []
+        self.deleted: list[int] = []
 
     async def send_message(self, **kwargs):
         del kwargs
@@ -43,6 +44,9 @@ class FakeBot:
 
     async def edit_message_text(self, **kwargs):
         self.edited.append(int(kwargs["message_id"]))
+
+    async def delete_message(self, **kwargs):
+        self.deleted.append(int(kwargs["message_id"]))
 
 
 async def _create_member(gateway: DatabaseGateway, clock: MutableClock, telegram_id: int):
@@ -160,7 +164,9 @@ async def test_history_record_lookup_cannot_cross_user_boundary(db_engine) -> No
     )
 
 
-async def test_new_screen_manager_restores_and_edits_persisted_message(db_engine) -> None:
+async def test_new_screen_manager_replaces_persisted_message_and_deletes_old_screen(
+    db_engine,
+) -> None:
     gateway = DatabaseGateway(create_session_factory(db_engine))
     clock = MutableClock()
     admin = await gateway.bootstrap_admin(telegram_user_id=1, timezone_name="UTC", now=NOW)
@@ -185,12 +191,15 @@ async def test_new_screen_manager_restores_and_edits_persisted_message(db_engine
         screen_kind="history",
     )
 
-    assert first_id == second_id == 701
-    assert bot.sent == 1
-    assert bot.edited == [701]
+    assert first_id == 701
+    assert second_id == 702
+    assert bot.sent == 2
+    assert bot.edited == []
+    assert bot.deleted == [701]
     state = await gateway.get_dashboard_state(admin.id)
     assert state is not None
     assert state.screen_kind == "history"
+    assert state.telegram_message_id == 702
 
 
 async def test_admin_bootstrap_rotates_code_and_binds_exactly_one_admin(db_engine) -> None:
